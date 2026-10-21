@@ -1,0 +1,6 @@
+# This folder is published publicly. Never commit readings or exports.
+*.csv
+*.jsonl
+*.json
+*conflicted copy*
+desktop.ini

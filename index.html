@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#2a78d6">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.dropboxapi.com https://content.dropboxapi.com; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+  <meta name="referrer" content="no-referrer">
+  <title>Blood pressure</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Blood pressure</h1>
+    <div id="status" class="status" role="status" aria-live="polite">Loading…</div>
+    <div class="status"><button type="button" id="connect-btn" class="secondary" hidden>Connect Dropbox</button></div>
+    <nav aria-label="Views">
+      <button type="button" data-view="log" aria-current="page">Log</button>
+      <button type="button" data-view="history">History</button>
+      <button type="button" data-view="charts">Chart</button>
+      <button type="button" data-view="insights">Insights</button>
+      <button type="button" data-view="report">Report</button>
+      <button type="button" data-view="data">Import / export</button>
+      <button type="button" data-view="about">About</button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="view-log">
+      <form id="log-form" class="card" autocomplete="off" novalidate>
+        <h2 id="log-title">New reading</h2>
+        <div class="bp-inputs">
+          <label>Systolic (upper)<input id="sys" inputmode="numeric" pattern="[0-9]*" maxlength="3" aria-describedby="log-title" required></label>
+          <label>Diastolic (lower)<input id="dia" inputmode="numeric" pattern="[0-9]*" maxlength="3" required></label>
+          <label>Pulse (optional)<input id="pulse" inputmode="numeric" pattern="[0-9]*" maxlength="3"></label>
+        </div>
+        <div class="row">
+          <span id="time-now" class="muted">Time: now</span>
+          <button type="button" id="change-time" class="secondary">Change time</button>
+        </div>
+        <div class="row" id="time-fields" hidden>
+          <label>Date <input type="date" id="log-date"></label>
+          <label>Time <input type="time" id="log-time"></label>
+        </div>
+        <div class="row">
+          <label>Where <select id="context"><option value="home">Home</option><option value="clinic">Clinic / surgery</option></select></label>
+          <label><input type="checkbox" id="protocol"> Home-monitoring week (NICE method)</label>
+        </div>
+        <h3>Tags (optional)</h3>
+        <div class="chips" id="tag-chips"></div>
+        <h3>Note (optional)</h3>
+        <textarea id="note" maxlength="300"></textarea>
+        <div id="pair-info" class="muted small" hidden></div>
+        <button type="submit" class="primary" id="save-btn">Save reading</button>
+      </form>
+      <div id="log-result"></div>
+    </section>
+
+    <section id="view-history" hidden>
+      <div class="card">
+        <h2>History</h2>
+        <div class="row">
+          <label><input type="checkbox" id="only-unchecked"> Only imported readings not yet checked</label>
+        </div>
+        <div id="history-list"></div>
+      </div>
+    </section>
+
+    <section id="view-charts" hidden>
+      <div class="card">
+        <div class="row no-print" role="group" aria-label="Period">
+          <button type="button" class="chip-toggle" data-range="7">7 days</button>
+          <button type="button" class="chip-toggle" data-range="30" aria-pressed="true">30 days</button>
+          <button type="button" class="chip-toggle" data-range="90">90 days</button>
+          <button type="button" class="chip-toggle" data-range="0">All</button>
+          <label><input type="checkbox" id="show-us"> Show US categories</label>
+        </div>
+        <div id="chart"></div>
+        <p class="muted small">Lines: 135/85 is the NHS threshold for home readings; 90/60 is the NHS low reading. US categories (ACC/AHA, as published by the CDC) are a different scheme and are off by default.</p>
+      </div>
+    </section>
+
+    <section id="view-insights" hidden>
+      <div id="insights"></div>
+    </section>
+
+    <section id="view-report" hidden>
+      <div class="card">
+        <div class="row no-print">
+          <label>Period <select id="report-range"><option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option><option value="90">Last 90 days</option><option value="0">All</option></select></label>
+          <button type="button" id="print-btn" class="secondary">Print / save as PDF</button>
+        </div>
+        <div id="report"></div>
+      </div>
+    </section>
+
+    <section id="view-data" hidden>
+      <div class="card">
+        <h2>Import readings from a CSV file</h2>
+        <p class="small muted">Columns: date (YYYY-MM-DD), time (HH:MM), systolic, diastolic, and optionally pulse and note. Importing the same file twice does not create duplicates.</p>
+        <input type="file" id="csv-file" accept=".csv,text/csv">
+        <div id="import-preview"></div>
+      </div>
+      <div class="card">
+        <h2>Export</h2>
+        <button type="button" id="export-btn" class="secondary">Download all readings as CSV</button>
+        <p class="small muted">Your raw data is also in Dropbox, in the app's own folder (<code>Dropbox/Apps/…</code>), one file per device.</p>
+      </div>
+    </section>
+
+    <section id="view-about" hidden>
+      <div class="card" id="about"></div>
+    </section>
+  </main>
+
+  <dialog id="edit-dialog">
+    <form id="edit-form" method="dialog">
+      <h2>Edit reading</h2>
+      <div id="edit-conflict"></div>
+      <div class="bp-inputs">
+        <label>Systolic<input id="e-sys" inputmode="numeric"></label>
+        <label>Diastolic<input id="e-dia" inputmode="numeric"></label>
+        <label>Pulse<input id="e-pulse" inputmode="numeric"></label>
+      </div>
+      <div class="row">
+        <label>Date <input type="date" id="e-date"></label>
+        <label>Time <input type="time" id="e-time"></label>
+      </div>
+      <div class="row">
+        <label>Where <select id="e-context"><option value="home">Home</option><option value="clinic">Clinic / surgery</option></select></label>
+        <label><input type="checkbox" id="e-protocol"> Home-monitoring week</label>
+      </div>
+      <label class="small">Tags (comma-separated) <input id="e-tags"></label>
+      <label class="small">Note <textarea id="e-note" maxlength="300"></textarea></label>
+      <div class="row" id="e-verified-row" hidden><label><input type="checkbox" id="e-verified"> Checked against the paper log</label></div>
+      <div id="e-source" class="small muted"></div>
+      <div class="row">
+        <button type="button" id="e-save" class="secondary">Save changes</button>
+        <button type="button" id="e-delete" class="danger">Delete</button>
+        <button type="button" id="e-cancel" class="secondary">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="tooltip" class="tooltip" hidden></div>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>
