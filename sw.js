@@ -1,6 +1,6 @@
 // Offline shell: the app's own files only. Dropbox traffic is never cached.
-const CACHE = 'bp-shell-v1';
-const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'model.js', 'stats.js', 'reference.js', 'import.js', 'chart.js', 'store.js', 'sync.js', 'dropbox.js', 'config.js', 'manifest.webmanifest', 'icon.svg'];
+const CACHE = 'bp-shell-v2';
+const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'model.js', 'stats.js', 'reference.js', 'import.js', 'omron.js', 'chart.js', 'store.js', 'sync.js', 'dropbox.js', 'config.js', 'manifest.webmanifest', 'icon.svg'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

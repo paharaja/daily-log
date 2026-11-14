@@ -2,6 +2,7 @@ import { fold, currentReadings, makeEvent, validate, fromLocal, localParts, newP
 import * as S from './stats.js';
 import { chips, isVeryHigh, BANNER_TEXT, SOURCES, CKS_TEXT, UK } from './reference.js';
 import { parseCSV, rowsToPayloads, toCSV } from './import.js';
+import { readMonitor, planImport, isDeviceSource } from './omron.js';
 import { renderChart } from './chart.js';
 import { idbStore } from './store.js';
 import { sync } from './sync.js';
@@ -245,18 +246,62 @@ function showResult(p, savedPair, wasPaired) {
   if (!state.pair) { $('log-title').textContent = 'New reading'; $('pair-info').hidden = true; clearInterval(countdown); }
 }
 
+// ---------- Omron monitor ----------
+function setupMonitor() {
+  const sel = $('monitor-user');
+  try { sel.value = localStorage.getItem('bp.monitorUser') || '1'; } catch { /* default user 1 */ }
+  sel.addEventListener('change', () => { try { localStorage.setItem('bp.monitorUser', sel.value); } catch { /* not remembered */ } });
+  if (!navigator.bluetooth) {
+    $('monitor-btn').hidden = true;
+    sel.closest('.row').hidden = true;
+    $('monitor-help').textContent = 'This browser cannot reach the monitor. Open the app in Chrome or Edge on the computer the monitor is paired with.';
+    return;
+  }
+  $('monitor-btn').addEventListener('click', getFromMonitor);
+}
+
+async function getFromMonitor() {
+  const btn = $('monitor-btn');
+  const out = $('monitor-result');
+  const user = Number($('monitor-user').value);
+  btn.disabled = true;
+  try {
+    const records = await readMonitor({ user, onStatus: (t) => { out.textContent = t; } });
+    const plan = planImport(records, user, { existingIds: new Set(state.folded.keys()), readings: state.readings, now: new Date() });
+    const evs = plan.add.map((i) => makeEvent({ op: 'create', reading_id: i.reading_id, payload: i.payload, device_id: DEVICE }));
+    if (evs.length) await save(evs);
+    const s = plan.skipped;
+    const parts = [`${plan.total} reading(s) in the monitor's memory for user ${user}.`, `<strong>${evs.length} added.</strong>`];
+    if (s.already) parts.push(`${s.already} already in the app.`);
+    if (s.typed) parts.push(`${s.typed} skipped because the same numbers were already typed in within 10 minutes.`);
+    if (s.undated) parts.push(`${s.undated} not added because they have no date: the monitor's clock was not set when they were taken. Readings taken after the clock is set will come through.`);
+    out.innerHTML = parts.join(' ');
+    recompute();
+  } catch (e) {
+    if (e.name === 'NotFoundError' && /cancel/i.test(e.message)) out.textContent = 'No monitor picked.';
+    else if (e.name === 'NotFoundError') out.textContent = `${e.message} Is Bluetooth switched on?`;
+    else out.textContent = `Could not read the monitor: ${e.message} Press the monitor's Bluetooth button and try again. If UBPM is open on this computer, close it first.`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // ---------- History & editing ----------
+const needsCheck = (r) => r.source !== 'manual' && !isDeviceSource(r.source) && r.verified === false;
 function renderHistory() {
   const only = $('only-unchecked').checked;
-  const list = state.readings.filter((r) => !only || (r.source !== 'manual' && r.verified === false)).slice().reverse();
-  const unchecked = state.readings.filter((r) => r.source !== 'manual' && r.verified === false).length;
+  const list = state.readings.filter((r) => !only || needsCheck(r)).slice().reverse();
+  const unchecked = state.readings.filter(needsCheck).length;
   let html = `<p class="small muted">${state.readings.length} readings${unchecked ? ` · ${unchecked} imported not yet checked` : ''}. Tap a reading to edit or delete it.</p>`;
   let day = '';
   for (const r of list) {
     if (r.local_date !== day) { day = r.local_date; html += `<div class="day">${esc(new Date(`${day}T12:00:00Z`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }))}</div>`; }
     const badges = [
       r._conflict ? '<span class="badge">edited on two devices — choose</span>' : '',
-      r.source && r.source !== 'manual' ? `<span class="badge">${r.verified ? 'imported, checked' : 'imported, not checked'}</span>` : '',
+      isDeviceSource(r.source) ? '<span class="badge">from monitor</span>' : '',
+      r.source && r.source !== 'manual' && !isDeviceSource(r.source) ? `<span class="badge">${r.verified ? 'imported, checked' : 'imported, not checked'}</span>` : '',
+      r.monitor_ihb ? '<span class="badge">monitor: irregular heartbeat flag</span>' : '',
+      r.monitor_movement ? '<span class="badge">monitor: body movement flag</span>' : '',
       r.context === 'clinic' ? '<span class="badge">clinic</span>' : '',
       r.protocol ? '<span class="badge">home week</span>' : '',
       ...(r.tags || []).map((t) => `<span class="badge">${esc(t)}</span>`),
@@ -284,10 +329,12 @@ function openEdit(id) {
   $('e-protocol').checked = !!p.protocol;
   $('e-tags').value = (p.tags || []).join(', ');
   $('e-note').value = p.note || '';
-  const imported = p.source && p.source !== 'manual';
+  const fromMonitor = isDeviceSource(p.source);
+  const imported = p.source && p.source !== 'manual' && !fromMonitor;
   $('e-verified-row').hidden = !imported;
   $('e-verified').checked = !!p.verified;
-  $('e-source').textContent = imported ? `Imported from ${p.source}${p.source_row ? `, row ${p.source_row}` : ''}.` : '';
+  $('e-source').textContent = fromMonitor ? `Read from the Omron monitor (${p.source.slice(7)}, user ${p.device_user}).`
+    : imported ? `Imported from ${p.source}${p.source_row ? `, row ${p.source_row}` : ''}.` : '';
   const c = $('edit-conflict');
   c.innerHTML = '';
   if (rec.conflict) {
@@ -514,6 +561,7 @@ window.addEventListener('resize', () => { if (state.view === 'charts') render();
 document.addEventListener('visibilitychange', () => { if (!document.hidden) doSync(); });
 $('connect-btn').addEventListener('click', () => dbx.startLogin());
 setupLog();
+setupMonitor();
 setupData();
 if (location.hash) showView(location.hash.slice(1));
 window.addEventListener('hashchange', () => { const v = location.hash.slice(1) || 'log'; if (v !== state.view) showView(v); });

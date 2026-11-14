@@ -30,6 +30,15 @@
 
   <main>
     <section id="view-log">
+      <div class="card" id="monitor-card">
+        <h2>From the Omron monitor</h2>
+        <p class="small muted" id="monitor-help">Press the Bluetooth button on the monitor, then press the button below and pick the monitor (BLESmart_…) in the list. Readings already in the app are skipped.</p>
+        <div class="row">
+          <label>Monitor user <select id="monitor-user"><option value="1">1</option><option value="2">2</option></select></label>
+        </div>
+        <button type="button" class="primary" id="monitor-btn">Get readings from the monitor</button>
+        <div id="monitor-result" class="small" role="status" aria-live="polite"></div>
+      </div>
       <form id="log-form" class="card" autocomplete="off" novalidate>
         <h2 id="log-title">New reading</h2>
         <div class="bp-inputs">
