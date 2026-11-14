@@ -273,14 +273,26 @@ async function getFromMonitor() {
     const s = plan.skipped;
     const parts = [`${plan.total} reading(s) in the monitor's memory for user ${user}.`, `<strong>${evs.length} added.</strong>`];
     if (s.already) parts.push(`${s.already} already in the app.`);
-    if (s.typed) parts.push(`${s.typed} skipped because the same numbers were already typed in within 10 minutes.`);
     if (s.undated) parts.push(`${s.undated} not added because they have no date: the monitor's clock was not set when they were taken. Readings taken after the clock is set will come through.`);
-    out.innerHTML = parts.join(' ');
+    const uncertain = plan.add.filter((i) => i.payload.time_uncertain).length;
+    if (uncertain) parts.push(`${uncertain} taken in the hour the clocks change: their time may be an hour out (marked in History).`);
+    let html = parts.join(' ');
+    if (plan.typedMatches.length) {
+      html += `<p>${plan.typedMatches.length} not added because they look like readings you typed in yourself (same numbers within 10 minutes):</p><ul>${plan.typedMatches.map((m) => `<li>${m.payload.systolic}/${m.payload.diastolic} at ${esc(m.payload.local_date)} ${esc(m.payload.local_time)} — typed ${m.typed.systolic}/${m.typed.diastolic} at ${esc(m.typed.local_time)}</li>`).join('')}</ul><button type="button" id="monitor-add-anyway" class="secondary">Add these anyway</button>`;
+    }
+    out.innerHTML = html;
+    $('monitor-add-anyway')?.addEventListener('click', async () => {
+      const more = plan.typedMatches.filter((m) => !state.folded.has(m.reading_id))
+        .map((m) => makeEvent({ op: 'create', reading_id: m.reading_id, payload: m.payload, device_id: DEVICE }));
+      if (more.length) await save(more);
+      out.innerHTML = `${parts.join(' ')} Added ${more.length} more.`;
+      recompute();
+    });
     recompute();
   } catch (e) {
     if (e.name === 'NotFoundError' && /cancel/i.test(e.message)) out.textContent = 'No monitor picked.';
     else if (e.name === 'NotFoundError') out.textContent = `${e.message} Is Bluetooth switched on?`;
-    else out.textContent = `Could not read the monitor: ${e.message} Press the monitor's Bluetooth button and try again. If UBPM is open on this computer, close it first.`;
+    else out.textContent = `Could not read the monitor: ${e.message} Press the monitor's Bluetooth button briefly and try again. If UBPM is open on this computer, close it first.`;
   } finally {
     btn.disabled = false;
   }
@@ -302,6 +314,7 @@ function renderHistory() {
       r.source && r.source !== 'manual' && !isDeviceSource(r.source) ? `<span class="badge">${r.verified ? 'imported, checked' : 'imported, not checked'}</span>` : '',
       r.monitor_ihb ? '<span class="badge">monitor: irregular heartbeat flag</span>' : '',
       r.monitor_movement ? '<span class="badge">monitor: body movement flag</span>' : '',
+      r.time_uncertain ? '<span class="badge">time uncertain (clock change)</span>' : '',
       r.context === 'clinic' ? '<span class="badge">clinic</span>' : '',
       r.protocol ? '<span class="badge">home week</span>' : '',
       ...(r.tags || []).map((t) => `<span class="badge">${esc(t)}</span>`),
