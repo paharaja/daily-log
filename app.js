@@ -272,6 +272,8 @@ async function getFromMonitor() {
     if (evs.length) await save(evs);
     const s = plan.skipped;
     const parts = [`${plan.total} reading(s) in the monitor's memory for user ${user}.`, `<strong>${evs.length} added.</strong>`];
+    const sets = plan.add.filter((i) => i.payload.truread_count);
+    if (sets.length) parts.push(`TruRead: ${sets.reduce((n, i) => n + i.payload.truread_count, 0)} readings came in as ${sets.length} average${sets.length > 1 ? 's' : ''}.`);
     if (s.already) parts.push(`${s.already} already in the app.`);
     if (s.undated) parts.push(`${s.undated} not added because they have no date: the monitor's clock was not set when they were taken. Readings taken after the clock is set will come through.`);
     const uncertain = plan.add.filter((i) => i.payload.time_uncertain).length;
@@ -292,7 +294,7 @@ async function getFromMonitor() {
   } catch (e) {
     if (e.name === 'NotFoundError' && /cancel/i.test(e.message)) out.textContent = 'No monitor picked.';
     else if (e.name === 'NotFoundError') out.textContent = `${e.message} Is Bluetooth switched on?`;
-    else out.textContent = `Could not read the monitor: ${e.message} Press the monitor's Bluetooth button briefly and try again. If UBPM is open on this computer, close it first.`;
+    else out.textContent = `Could not read the monitor: ${e.message} Press the monitor's Bluetooth button and try again. If UBPM is open on this computer, close it first.`;
   } finally {
     btn.disabled = false;
   }
@@ -311,6 +313,7 @@ function renderHistory() {
     const badges = [
       r._conflict ? '<span class="badge">edited on two devices — choose</span>' : '',
       isDeviceSource(r.source) ? '<span class="badge">from monitor</span>' : '',
+      r.truread_count ? `<span class="badge" title="${esc((r.monitor_readings || []).map((m) => `${m.systolic}/${m.diastolic}`).join(', '))}">TruRead average of ${Number(r.truread_count)}</span>` : '',
       r.source && r.source !== 'manual' && !isDeviceSource(r.source) ? `<span class="badge">${r.verified ? 'imported, checked' : 'imported, not checked'}</span>` : '',
       r.monitor_ihb ? '<span class="badge">monitor: irregular heartbeat flag</span>' : '',
       r.monitor_movement ? '<span class="badge">monitor: body movement flag</span>' : '',
