@@ -103,8 +103,24 @@ async function init() {
   } catch (e) { toast(e.message); }
   await refreshLocal();
   doSync();
-  if ('serviceWorker' in navigator && isSecureContext) navigator.serviceWorker.register('sw.js').catch(() => {});
+  if ('serviceWorker' in navigator && isSecureContext) {
+    // sw.js serves the stored copy first and activates a newer version as soon as it has downloaded it. This page
+    // still runs the old code, so when the newer version takes over the page reloads: at once if nothing is in
+    // progress, otherwise the next time the app is shown.
+    let hadController = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadController) { hadController = true; return; } // first install: this page is already the newest
+      newVersionReady = true;
+      reloadIfIdle();
+    });
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
 }
+
+let newVersionReady = false;
+// Not while the monitor is being read, or while a reading or note is half typed.
+const appBusy = () => $('monitor-btn')?.disabled || ['sys', 'dia', 'pulse', 'note'].some((id) => $(id)?.value?.trim());
+function reloadIfIdle() { if (newVersionReady && !appBusy()) location.reload(); }
 
 setInterval(() => { if (!document.hidden) doSync(); }, 120000);
 window.addEventListener('online', doSync);
@@ -576,7 +592,7 @@ $('e-save').addEventListener('click', saveEdit);
 $('e-delete').addEventListener('click', deleteEdit);
 $('e-cancel').addEventListener('click', () => $('edit-dialog').close());
 window.addEventListener('resize', () => { if (state.view === 'charts') render(); });
-document.addEventListener('visibilitychange', () => { if (!document.hidden) doSync(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { reloadIfIdle(); doSync(); } });
 $('connect-btn').addEventListener('click', () => dbx.startLogin());
 setupLog();
 setupMonitor();
