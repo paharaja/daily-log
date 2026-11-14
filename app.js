@@ -2,7 +2,7 @@ import { fold, currentReadings, makeEvent, validate, fromLocal, localParts, newP
 import * as S from './stats.js';
 import { chips, isVeryHigh, BANNER_TEXT, SOURCES, CKS_TEXT, UK } from './reference.js';
 import { parseCSV, rowsToPayloads, toCSV } from './import.js';
-import { readMonitor, planImport, isDeviceSource } from './omron.js';
+import { readMonitor, planImport, knownIdsFrom, isDeviceSource } from './omron.js';
 import { renderChart } from './chart.js';
 import { idbStore } from './store.js';
 import { sync } from './sync.js';
@@ -267,14 +267,16 @@ async function getFromMonitor() {
   btn.disabled = true;
   try {
     const records = await readMonitor({ user, onStatus: (t) => { out.textContent = t; } });
-    const plan = planImport(records, user, { existingIds: new Set(state.folded.keys()), readings: state.readings, now: new Date() });
+    const plan = planImport(records, user, { existingIds: knownIdsFrom(state.folded), readings: state.readings, now: new Date() });
     const evs = plan.add.map((i) => makeEvent({ op: 'create', reading_id: i.reading_id, payload: i.payload, device_id: DEVICE }));
     if (evs.length) await save(evs);
     const s = plan.skipped;
-    const parts = [`${plan.total} reading(s) in the monitor's memory for user ${user}.`, `<strong>${evs.length} added.</strong>`];
+    // Counts below are of the monitor's own readings, except the number added to the app.
+    const parts = [`${plan.total} reading(s) in the monitor's memory for user ${user}.`, `<strong>${evs.length} added to the app.</strong>`];
     const sets = plan.add.filter((i) => i.payload.truread_count);
-    if (sets.length) parts.push(`TruRead: ${sets.reduce((n, i) => n + i.payload.truread_count, 0)} readings came in as ${sets.length} average${sets.length > 1 ? 's' : ''}.`);
-    if (s.already) parts.push(`${s.already} already in the app.`);
+    if (sets.length) parts.push(`TruRead: ${sets.reduce((n, i) => n + i.payload.truread_count, 0)} of the monitor's readings came in as ${sets.length} average${sets.length > 1 ? 's' : ''}.`);
+    if (s.pending) parts.push(`${s.pending} of the monitor's readings are from ${s.pendingSets > 1 ? `${s.pendingSets} TruRead measurements` : 'a TruRead measurement'} that may not be finished yet: left for the next import.`);
+    if (s.already) parts.push(`${s.already} of the monitor's readings were skipped: they, or their TruRead set, were imported before (deleted ones stay deleted).`);
     if (s.undated) parts.push(`${s.undated} not added because they have no date: the monitor's clock was not set when they were taken. Readings taken after the clock is set will come through.`);
     const uncertain = plan.add.filter((i) => i.payload.time_uncertain).length;
     if (uncertain) parts.push(`${uncertain} taken in the hour the clocks change: their time may be an hour out (marked in History).`);

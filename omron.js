@@ -91,19 +91,22 @@ export function decodeRecord(rec) {
     hour: bits(rec, 91, 95), minute: bits(rec, 68, 73), second: bits(rec, 74, 79),
     systolic: bits(rec, 120, 127) + 25, diastolic: bits(rec, 112, 119), pulse: bits(rec, 104, 111),
     ihb: bits(rec, 81, 81), mov: bits(rec, 80, 80),
-    // Not in omblepy. Seen on this monitor (2026-11-14): the 3 readings of a TruRead measurement carry
-    // 1, 2, 3 here; ordinary readings carry 0.
+    // Not in omblepy, and not confirmed by any public source. Seen on this monitor (2026-11-14, one set):
+    // the 3 readings of a TruRead measurement carried 1, 2, 3 here; 41 ordinary readings carried 0.
     truread: bits(rec, 64, 65),
   };
 }
 
-// A TruRead measurement is stored as 3 separate readings numbered 1, 2, 3. Group each run of
-// consecutively numbered readings taken within 15 minutes; every other reading is a group of one.
+// A TruRead measurement is stored as 3 separate readings numbered 1, 2, 3. Records are first put in time
+// order (how the memory is ordered once it holds 100 readings is not known), then each run of consecutively
+// numbered readings taken within 15 minutes is one set; every other reading is a group of one.
+export const TRUREAD_SET = 3;
 const recMs = (r) => Date.UTC(r.year, r.month - 1, r.day, r.hour, r.minute, Math.min(r.second, 59));
 export function groupTruRead(records) {
   const groups = [];
   let cur = null;
-  for (const r of records) {
+  const inTimeOrder = records.map((r, i) => ({ r, i })).sort((a, b) => recMs(a.r) - recMs(b.r) || a.i - b.i).map((x) => x.r);
+  for (const r of inTimeOrder) {
     const n = r.truread || 0;
     const last = cur && cur[cur.length - 1];
     if (n > 0 && last && n === last.truread + 1 && Math.abs(recMs(r) - recMs(cur[0])) <= 15 * 60000) { cur.push(r); continue; }
@@ -146,20 +149,40 @@ export function deviceReadingId(r, user) {
 // monitor reading does not come back). readings: current readings, used to spot ones already typed in.
 // A typed reading matches at most one monitor reading: same systolic and diastolic, pulse equal when
 // both have one, within 10 minutes, nearest first. Matched monitor readings are returned, not dropped.
+// Every reading id the app has ever held, deleted ones included, plus the monitor readings behind every
+// TruRead average it has ever held (from each reading's full history, so a deleted average counts too).
+export function knownIdsFrom(folded) {
+  const ids = new Set(folded.keys());
+  for (const r of folded.values()) for (const e of r.history || []) for (const m of e.payload?.monitor_reading_ids || []) ids.add(m);
+  return ids;
+}
+
 export function planImport(records, user, { existingIds = new Set(), readings = [], now = new Date() } = {}) {
   const cands = [];
-  const skipped = { undated: 0, already: 0, typed: 0 };
+  const skipped = { undated: 0, already: 0, typed: 0, pending: 0, pendingSets: 0 };
   const seen = new Set();
+  // Readings already in the app as part of an average count as known too.
+  const known = new Set(existingIds);
+  for (const x of readings) for (const m of x.monitor_reading_ids || []) known.add(m);
   // Each group is one reading for the app: an ordinary reading, or the average of a TruRead set
   // (rounded to whole numbers, at the time of the set's first reading, with the set's readings kept).
   // A set any of whose readings is already in the app (imported one by one before) is left alone.
+  // A set with fewer than 3 readings whose last one is under 15 minutes old may still be running:
+  // it is left for the next import.
   for (const g of groupTruRead(records)) {
     const ts = g.map((r) => recordTime(r, now));
     if (ts.some((t) => !t.ok)) { skipped.undated += g.length; continue; }
+    const isSet = (g[0].truread || 0) > 0;
+    if (isSet && g[g.length - 1].truread < TRUREAD_SET && now.getTime() - Date.parse(ts[ts.length - 1].measured_at_utc) < 15 * 60000) {
+      skipped.pending += g.length;
+      skipped.pendingSets++;
+      continue;
+    }
     const ids = g.map((r) => deviceReadingId(r, user));
-    const id = g.length > 1 ? `${ids[0]}-truread${g.length}` : ids[0];
-    if ([id, ...ids].some((x) => existingIds.has(x) || seen.has(x))) { skipped.already += g.length; continue; }
+    const id = g.length > 1 ? `${ids[0]}-truread` : ids[0];
+    if ([id, ...ids].some((x) => known.has(x) || seen.has(x))) { skipped.already += g.length; continue; }
     seen.add(id);
+    for (const x of ids) seen.add(x);
     const t = ts[0];
     const mean = (xs) => (xs.length ? Math.round(xs.reduce((a, b) => a + b, 0) / xs.length) : null);
     const pulse = mean(g.map((r) => r.pulse).filter(Boolean));
@@ -172,6 +195,7 @@ export function planImport(records, user, { existingIds = new Set(), readings = 
     if (g.length > 1) {
       payload.truread_count = g.length;
       payload.monitor_readings = g.map((r, i) => ({ systolic: r.systolic, diastolic: r.diastolic, pulse: r.pulse || null, monitor_time: ts[i].monitor_time }));
+      payload.monitor_reading_ids = ids;
     }
     if (ts.some((x) => x.uncertain)) payload.time_uncertain = true;
     if (g.some((r) => r.ihb)) payload.monitor_ihb = true;
@@ -201,19 +225,29 @@ export function planImport(records, user, { existingIds = new Set(), readings = 
 
 // ---------- Web Bluetooth ----------
 // Asks the person to pick the monitor, reads one user's memory, and disconnects.
-// Windows lists a paired monitor even while it is asleep, and Chrome then "connects" to Windows' remembered
-// copy, which drops straight away. So connecting is retried until the monitor answers, for up to connectMs.
-export async function readMonitor({ user = 1, onStatus = () => {}, bluetooth = globalThis.navigator?.bluetooth, timeoutMs = 2000, connectMs = 60000, retryMs = 1500 } = {}) {
+// Seen on Windows (2026-11-14): connect() resolved and the link dropped about 0.3 s later at times when the
+// monitor would not hold a connection; it held one some seconds after its Bluetooth button was pressed.
+// So connecting is retried until it holds, for at most connectMs in all. Chromium on Windows asks the OS to
+// maintain the connection, and gatt.disconnect() closes that session, so between tries the loop only waits and
+// asks again; it closes the link and opens it again only after 2 failures on a link that stayed up.
+// The read in progress on each device: a late connect() from an earlier read must not close a later read's link.
+const activeReads = new Map();
+export async function readMonitor({ user = 1, onStatus = () => {}, bluetooth = globalThis.navigator?.bluetooth, timeoutMs = 2000, connectMs = 60000, retryMs = 2500 } = {}) {
   if (!bluetooth) throw new Error('This browser cannot use Bluetooth. Use Chrome or Edge on the computer the monitor is paired with.');
   const start = USER_START[user];
   if (start == null) throw new Error(`Unknown monitor user ${user}.`);
   onStatus('Pick the monitor in the list…');
   const device = await bluetooth.requestDevice({ filters: FILTERS, optionalServices: [SERVICE] });
+  const readKey = device.id ?? device;
+  const thisRead = {};
+  activeReads.set(readKey, thisRead);
   let gone = false;
+  let finished = false; // set once the read is over: a connect() that completes after that is closed again
   let waiter = null; // receives each reply (or null on disconnect) while a command is waiting
   let feed = assembler();
   let rx = null;
-  const onGone = () => { gone = true; if (waiter) waiter(null); };
+  // A disconnect event that arrives while the link is up belongs to an earlier try: ignore it.
+  const onGone = () => { if (device.gatt && device.gatt.connected === true) return; gone = true; if (waiter) waiter(null); };
   const onValue = (ev) => {
     const dv = ev.target.value;
     for (const p of feed(new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength))) if (waiter) waiter(p);
@@ -223,27 +257,22 @@ export async function readMonitor({ user = 1, onStatus = () => {}, bluetooth = g
   try {
     let tx = null;
     const giveUp = Date.now() + connectMs;
-    for (let attempt = 1; ; attempt++) {
-      try {
-        gone = false;
-        const server = await device.gatt.connect();
-        const svc = await server.getPrimaryService(SERVICE);
-        const r = await svc.getCharacteristic(RX);
-        tx = await svc.getCharacteristic(TX);
-        await r.startNotifications();
-        if (gone) throw new Error('disconnected while connecting');
-        rx = r;
-        break;
-      } catch (e) {
-        try { device.gatt.disconnect(); } catch { /* not connected */ }
-        if (Date.now() + retryMs > giveUp) {
-          throw new Error(`Could not connect to the monitor (${e && e.message ? e.message : e}). Press the monitor's Bluetooth button and try again.`);
-        }
-        onStatus(`Waiting for the monitor to answer — press its Bluetooth button if you haven't (try ${attempt})…`);
-        await new Promise((r) => setTimeout(r, retryMs));
-      }
-    }
-    rx.addEventListener('characteristicvaluechanged', onValue);
+    // Every step must start and finish before the overall deadline; once it has passed, no step is started.
+    // The finally block disconnects whatever is still pending.
+    const inTime = (step) => {
+      if (Date.now() >= giveUp) return Promise.reject(new Error('no answer in time'));
+      return new Promise((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error('no answer in time')), giveUp - Date.now());
+        Promise.resolve().then(step).then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
+      });
+    };
+    const connect = () => {
+      const c = device.gatt.connect();
+      Promise.resolve(c).then(() => {
+        if (finished && activeReads.get(readKey) === thisRead) { try { device.gatt.disconnect(); } catch { /* already closed */ } }
+      }, () => {});
+      return c;
+    };
     const write = (b) => (tx.writeValueWithoutResponse ? tx.writeValueWithoutResponse(b) : tx.writeValue(b));
     // Send a command and wait for its answer. Replies of another type, or for another address, are
     // late answers to an earlier attempt: they are ignored and the wait goes on. Up to 5 attempts.
@@ -271,7 +300,38 @@ export async function readMonitor({ user = 1, onStatus = () => {}, bluetooth = g
       }
       throw new Error(gone ? 'The monitor disconnected.' : `The monitor stopped answering (${last}).`);
     };
-    await send(cmdStart(), '8000');
+    // The link counts as up only once the monitor has answered the start command.
+    let server = null;
+    let failsOnLink = 0; // failures while the link stayed up: after 2, that link is closed and reopened
+    for (let attempt = 1; ; attempt++) {
+      try {
+        if (attempt > 1 && Date.now() >= giveUp) throw new Error('no answer in time');
+        if (!server || device.gatt.connected !== true) { server = await inTime(connect); failsOnLink = 0; }
+        const svc = await inTime(() => server.getPrimaryService(SERVICE));
+        const r = await inTime(() => svc.getCharacteristic(RX));
+        tx = await inTime(() => svc.getCharacteristic(TX));
+        await inTime(() => r.startNotifications());
+        if (r !== rx) {
+          if (rx) rx.removeEventListener('characteristicvaluechanged', onValue);
+          rx = r;
+          rx.addEventListener('characteristicvaluechanged', onValue);
+        }
+        if (device.gatt.connected === false) throw new Error('the link dropped while connecting');
+        gone = false;
+        await inTime(() => send(cmdStart(), '8000'));
+        break;
+      } catch (e) {
+        if (Date.now() + retryMs >= giveUp) {
+          throw new Error(`Could not connect to the monitor (${e && e.message ? e.message : e}).`);
+        }
+        if (device.gatt.connected === true && ++failsOnLink >= 2) {
+          try { device.gatt.disconnect(); } catch { /* already closed */ }
+          server = null;
+        }
+        onStatus(`Waiting for the monitor to connect — press its Bluetooth button if you haven't (try ${attempt})…`);
+        await new Promise((r) => setTimeout(r, retryMs));
+      }
+    }
     const records = [];
     for (let k = 0; k < SLOTS; k++) {
       onStatus(`Reading the monitor's memory… ${Math.round((k / SLOTS) * 100)}%`);
@@ -282,12 +342,21 @@ export async function readMonitor({ user = 1, onStatus = () => {}, bluetooth = g
     try { await send(cmdEnd(), '8f00'); } catch { /* the readings are already in hand */ }
     return records;
   } finally {
+    // Stop any command still waiting, so nothing more is written once the read is over.
+    gone = true;
+    if (waiter) waiter(null);
     waiter = null;
     if (rx) {
       rx.removeEventListener('characteristicvaluechanged', onValue);
-      try { await rx.stopNotifications(); } catch { /* disconnecting anyway */ }
+      // Waits at most 1 second: disconnecting ends the notifications anyway.
+      if (device.gatt.connected !== false) {
+        let t = null;
+        try { await Promise.race([rx.stopNotifications(), new Promise((r) => { t = setTimeout(r, 1000); })]); } catch { /* disconnecting anyway */ }
+        clearTimeout(t);
+      }
     }
     device.removeEventListener?.('gattserverdisconnected', onGone);
     try { device.gatt.disconnect(); } catch { /* already gone */ }
+    finished = true; // only now: a connect() completing before this point is closed by the disconnect above
   }
 }
